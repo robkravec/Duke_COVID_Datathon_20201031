@@ -1,0 +1,144 @@
+---
+title: "Datathon_Unemployment"
+author: "Rob Kravec"
+date: "10/31/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ipumsr)
+library(tidyverse)
+library(rvest)
+library(zoo)
+```
+
+```{r load-data}
+ddi <- read_ipums_ddi("cps_00002.xml")
+data <- read_ipums_micro(ddi)
+```
+
+Start with data cleaning
+
+```{r data-cleaning}
+# Start by looking at the most recent data, which we have at a monthly level
+# Filter for ages 21-65
+data_clean <- data %>% 
+  filter(YEAR >= 2019,
+         AGE >= 21,
+         AGE < 65,
+         LABFORCE > 0)
+
+# Check for incidence of missing employment status flag
+mean(data_clean$EMPSTAT == 0)
+mean(data_clean$LABFORCE == 0)
+
+# Create relevant variables for unemployment rate calculations
+data_clean <- data_clean %>% 
+  mutate(employed = as.numeric(EMPSTAT %in% c(1, 10, 12)) * WTFINL,
+         lf_weighted = (LABFORCE - 1) * WTFINL)
+```
+
+Create a data frame grouped by relevant variables to determine unemployment rate
+
+```{r group-df}
+# Create grouped data frame
+data_clean_group <- data_clean %>% 
+  group_by(YEAR, MONTH, STATEFIP, METFIPS) %>% 
+  summarise(employed = sum(employed),
+            labor_force = sum(lf_weighted),
+            total_pop = sum(WTFINL))
+
+# Calculate unemployment rate
+data_clean_group <- data_clean_group %>% 
+  mutate(unemp_rt = 1 - employed / labor_force)
+
+# Sanity check: How many employed people are there at a point in time?
+jan_2019 <- data_clean_group %>% 
+  filter(YEAR == 2019, MONTH == 1)
+sum(jan_2019$employed)
+# We get 138M, which seems about right (depending on where you look on the 
+# internet)
+
+# Another sanity check: What is the overall unemployment rate at a point in time?
+1 - sum(jan_2019$employed) / sum(jan_2019$labor_force)
+# 4.0% -- that also looks right!
+```
+
+At this point, if we're interested in metro-area-level trends, we need to 
+exclude observations with unobserved METFIPS values
+
+```{r filter}
+# Check for percentage of labor force that pertains to an unidentified 
+# METFIPS value
+sum(data_clean_group[which(data_clean_group$METFIPS %in% c(99998, 99999)),]$labor_force) / sum(data_clean_group$labor_force)
+# That's not great, but it looks like we'll lose observations pertaining to 
+# about 15% of the labor force
+
+# Create filtered df. Cgf = cleaned, grouped, filtered
+data_cgf <- data_clean_group %>% 
+  filter(!(METFIPS %in% c(99998, 99999)))
+```
+
+Scrape METFIPS crosswalk from ipums website
+
+```{r metfips-scrape}
+# Define URL
+url <- "https://cps.ipums.org/cps/codes/metfips_2014onward_codes.shtml"
+
+# Pull the location
+fips_location <- read_html(url) %>% 
+  html_nodes(css = "dd") %>% 
+  html_text()
+
+# Pull the code
+fips_code <- read_html(url) %>% 
+  html_nodes(css = "dt") %>% 
+  html_text()
+
+# Combine location and code into a crosswalk
+fips_cw <- data.frame(METFIPS = as.numeric(fips_code), 
+                      location = fips_location)
+```
+
+Add location label to data frame with unemployment data
+
+```{r merge-location}
+# Join data sets
+data_cgf_loc <- left_join(x = data_cgf, y = fips_cw, by = "METFIPS")
+
+# Create a single data columns
+data_cgf_loc <- data_cgf_loc %>% 
+  mutate(year_mon = as.yearmon(paste(YEAR, MONTH), "%Y %m"))
+```
+
+Let's do a quick visualization of a few cities just to make sure everything 
+looks OK
+
+```{r plot-unemployment-rate}
+# Tucson, AZ
+data_cgf_loc %>% 
+  filter(location == "Tucson, AZ") %>% 
+  ggplot(mapping = aes(x = year_mon, y = unemp_rt)) + geom_line() +
+  labs(x = "Date", y = "Unemployment rate",
+       title = "Unemployment rate over time in Tucson, AZ") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# Birmingham, AL
+data_cgf_loc %>% 
+  filter(location == "Birmingham-Hoover, AL") %>% 
+  ggplot(mapping = aes(x = year_mon, y = unemp_rt)) + geom_line() +
+  labs(x = "Date", y = "Unemployment rate",
+       title = "Unemployment rate over time in Birmingham, AL") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# Fresno, CA
+data_cgf_loc %>% 
+  filter(location == "Fresno, CA") %>% 
+  ggplot(mapping = aes(x = year_mon, y = unemp_rt)) + geom_line() +
+  labs(x = "Date", y = "Unemployment rate",
+       title = "Unemployment rate over time in Fresno, CA") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+Next steps: Create rolling average variables to quantify trends
