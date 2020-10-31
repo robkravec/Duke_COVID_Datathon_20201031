@@ -141,4 +141,136 @@ data_cgf_loc %>%
   theme(plot.title = element_text(hjust = 0.5))
 ```
 
-Next steps: Create rolling average variables to quantify trends
+Create some time series variables
+
+```{r}
+# Focus on three month and six month rolling average
+data_cgf_loc <- data_cgf_loc %>% 
+  ungroup() %>% 
+  group_by(location) %>% 
+  arrange(location, YEAR, MONTH) %>% 
+  mutate(lag1 = lag(x = unemp_rt, n = 1),
+         lag2 = lag(x = unemp_rt, n = 2),
+         lag3 = lag(x = unemp_rt, n = 3),
+         lag4 = lag(x = unemp_rt, n = 4),
+         lag5 = lag(x = unemp_rt, n = 5),
+         avg3 = (unemp_rt + lag1 + lag2) / 3,
+         avg6 = (unemp_rt + lag1 + lag2 + lag3 + lag4 + lag5) / 6
+         )
+```
+
+Let's see if the trends are a little smoother for `avg3` and `avg6` in the 3
+cities that we visualized before
+
+```{r plot-unemployment-rate-smooth}
+# Tucson, AZ
+data_cgf_loc %>% 
+  filter(location == "Tucson, AZ") %>% 
+  ggplot(mapping = aes(x = year_mon)) + 
+  geom_line(mapping = aes(y = unemp_rt, color = "Point in time")) +
+  geom_line(mapping = aes(y = avg3, color = "3 month")) +
+  geom_line(mapping = aes(y = avg6, color = "6 month")) +
+  labs(x = "Date", y = "Unemployment rate",
+       title = "Unemployment rate over time in Tucson, AZ",
+       color = "Legend") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# Birmingham, AL
+data_cgf_loc %>% 
+  filter(location == "Birmingham-Hoover, AL") %>% 
+  ggplot(mapping = aes(x = year_mon)) + 
+  geom_line(mapping = aes(y = unemp_rt, color = "Point in time")) +
+  geom_line(mapping = aes(y = avg3, color = "3 month")) +
+  geom_line(mapping = aes(y = avg6, color = "6 month")) +
+  labs(x = "Date", y = "Unemployment rate",
+       title = "Unemployment rate over time in Birmingham, AL",
+       color = "Legend") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# Fresno, CA
+data_cgf_loc %>% 
+  filter(location == "Fresno, CA") %>% 
+  ggplot(mapping = aes(x = year_mon)) + 
+  geom_line(mapping = aes(y = unemp_rt, color = "Point in time")) +
+  geom_line(mapping = aes(y = avg3, color = "3 month")) +
+  geom_line(mapping = aes(y = avg6, color = "6 month")) +
+  labs(x = "Date", y = "Unemployment rate",
+       title = "Unemployment rate over time in Fresno, CA",
+       color = "Legend") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+Create variables that indicate changes in rolling average unemployment rate
+
+```{r diff-variables}
+data_cgf_loc <- data_cgf_loc %>% 
+  mutate(diff1 = avg3 - lag(x = avg3, n = 1),
+         diff3 = avg3 - lag(x = avg3, n = 3),
+         diff6 = avg3 - lag(x = avg3, n = 6),
+         diff12 = avg3 - lag(x = avg3, n = 12)
+         )
+```
+
+Flag worst unemployment rate month for each location
+
+```{r worst-unemp-rt}
+data_cgf_loc <- data_cgf_loc %>% 
+  mutate(worst_month = ifelse(avg3 == max(avg3, na.rm = T), 1, 0))
+```
+
+NOTE: I've noticed a non-negligible number of entries observations with a 3-month
+rolling average unemployment rate of 0. That's certainly not ideal, and we may
+need to do some filtering going forward to remove those locations
+
+```{r flaggin-zeros}
+# Inspect locations that achieve a 3-month rolling average of zero unemployment
+zeros <- data_cgf_loc %>% 
+  filter(avg3 == 0)
+# While some of these may make sense (like heavy tourist towns), most are likely
+# a result of poor data collection
+
+# We'll create a flag for these locations and potentially exclude later on
+data_cgf_loc <- data_cgf_loc %>% 
+  mutate(zero_unemp = ifelse(location %in% zeros$location, 1, 0))
+```
+
+At the peak of unemployment rates (for each location), which locations had the
+highest absolute unemployment rates? Highest increase in unemployment (over 
+different time horizons)?
+
+```{r largest-unemp}
+# Highest unemployment at peak
+data_cgf_loc %>% 
+  filter(worst_month == 1, YEAR == 2020, !is.na(avg6), zero_unemp == 0) %>% 
+  select(MONTH, location, unemp_rt, avg3, avg6, diff1, diff3, diff6, diff12) %>% 
+  arrange(desc(unemp_rt))
+
+# Highest 3 month increase in unemployment at peak
+data_cgf_loc %>% 
+  filter(worst_month == 1, YEAR == 2020, !is.na(avg6), zero_unemp == 0) %>% 
+  select(MONTH, location, unemp_rt, avg3, avg6, diff1, diff3, diff6, diff12) %>% 
+  arrange(desc(diff3))
+
+# Highest 12 month increase in unemployment at peak
+data_cgf_loc %>% 
+  filter(worst_month == 1, YEAR == 2020, !is.na(avg6), zero_unemp == 0) %>% 
+  select(MONTH, location, unemp_rt, avg3, avg6, diff1, diff3, diff6, diff12) %>% 
+  arrange(desc(diff12))
+```
+
+Looking at September 2020 data, which locations are not doing significantly 
+worse (or even better) on unemployment rate, relative to 12 months prior?
+
+```{r}
+data_cgf_loc %>% 
+  filter(YEAR == 2020, MONTH == 9, zero_unemp == 0) %>% 
+  select(MONTH, location, unemp_rt, avg3, avg6, diff1, diff3, diff6, diff12) %>% 
+  arrange(diff12)
+```
+
+Save dataset to data folder that is easily accessible
+
+```{r save-data}
+saveRDS(object = data_cgf_loc, file = "data/unemployment.RDS")
+```
+
