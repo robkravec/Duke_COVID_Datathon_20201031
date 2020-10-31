@@ -1,6 +1,5 @@
 library(tidyverse)
 library(lubridate)
-library(sjmisc)
 
 # For description of variables:
 # https://github.com/OxCGRT/covid-policy-tracker/blob/master/documentation/codebook.md
@@ -12,8 +11,11 @@ raw_data <- read.csv(url)
 clean_data <- raw_data %>%
   janitor::clean_names() %>%
   mutate(date = ymd(date)) %>%
-  select(-contains("flag")) %>%
-  to_dummy(c1_school_closing)
+  select(-contains("flag"),
+         -m1_wildcard)
+
+# further clean variable names
+names(clean_data)[6:23] <- substring(names(clean_data)[6:23], 4)
 
 # country-level data
 world_data <- clean_data %>%
@@ -23,4 +25,7 @@ world_data <- clean_data %>%
 # state-level data
 state_data <- clean_data %>%
   filter(country_code == "USA",
-         region_code  != "")
+         region_code  != "") %>%
+  select(-c("country_name", 
+            "country_code")) %>%
+  rename(state = region_name)
