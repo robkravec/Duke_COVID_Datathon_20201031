@@ -107,7 +107,7 @@ Add location label to data frame with unemployment data
 # Join data sets
 data_cgf_loc <- left_join(x = data_cgf, y = fips_cw, by = "METFIPS")
 
-# Create a single data columns
+# Create a single date column
 data_cgf_loc <- data_cgf_loc %>% 
   mutate(year_mon = as.yearmon(paste(YEAR, MONTH), "%Y %m"))
 ```
@@ -272,5 +272,81 @@ Save dataset to data folder that is easily accessible
 
 ```{r save-data}
 saveRDS(object = data_cgf_loc, file = "data/unemployment.RDS")
+```
+
+It turns out that we need to have county FIP code in order to merge with a
+different data source about COVID rates. I'll now work on getting a version
+of the data that is grouped by county FIPS
+
+```{r}
+# Create grouped data frame
+data_clean_county <- data_clean %>% 
+  filter(COUNTY != 0) %>% 
+  group_by(YEAR, MONTH, STATEFIP, COUNTY, METFIPS) %>% 
+  summarise(employed = sum(employed),
+            labor_force = sum(lf_weighted),
+            total_pop = sum(WTFINL))
+
+# Calculate unemployment rate
+data_clean_county <- data_clean_county %>% 
+  mutate(unemp_rt = 1 - employed / labor_force)
+
+# Add columns
+data_clean_county <- data_clean_county %>% 
+  ungroup() %>% 
+  group_by(COUNTY) %>% 
+  arrange(COUNTY, YEAR, MONTH) %>% 
+  mutate(lag1 = lag(x = unemp_rt, n = 1),
+         lag2 = lag(x = unemp_rt, n = 2),
+         lag3 = lag(x = unemp_rt, n = 3),
+         lag4 = lag(x = unemp_rt, n = 4),
+         lag5 = lag(x = unemp_rt, n = 5),
+         avg3 = (unemp_rt + lag1 + lag2) / 3,
+         avg6 = (unemp_rt + lag1 + lag2 + lag3 + lag4 + lag5) / 6,
+         diff1 = avg3 - lag(x = avg3, n = 1),
+         diff3 = avg3 - lag(x = avg3, n = 3),
+         diff6 = avg3 - lag(x = avg3, n = 6),
+         diff12 = avg3 - lag(x = avg3, n = 12),
+         worst_month = ifelse(avg3 == max(avg3, na.rm = T), 1, 0)
+         )
+
+# Inspect locations that achieve a 3-month rolling average of zero unemployment
+zeros <- data_clean_county %>% 
+  filter(avg3 == 0)
+# While some of these may make sense (like heavy tourist towns), most are likely
+# a result of poor data collection
+
+# We'll create a flag for these locations and potentially exclude later on
+data_clean_county <- data_clean_county %>% 
+  mutate(zero_unemp = ifelse(COUNTY %in% zeros$COUNTY, 1, 0))
+
+# Add location
+# Join data sets
+data_clean_county <- left_join(x = data_clean_county, y = fips_cw, by = "METFIPS")
+
+# Create a single date column
+data_clean_county <- data_clean_county %>% 
+  mutate(year_mon = as.yearmon(paste(YEAR, MONTH), "%Y %m"))
+
+# Save data
+saveRDS(object = data_clean_county, file = "data/unemployment_county.RDS")
+```
+
+Export merged unemployment and COVID data
+
+```{r}
+# Group COVID data
+covid_group <- covid_data %>% 
+  group_by(county_name, countyFIPS, stateFIPS, year, month) %>% 
+  summarise(pop = mean(population),
+            cases = max(cases),
+            death = max(deaths)) %>% 
+  mutate(COUNTY = countyFIPS,
+         MONTH = month)
+
+# Combine COVID and unemployment data. Filter for only 2020
+unemp_covid <- left_join(x = data_clean_county, y = covid_group, 
+                         by = c("COUNTY", "MONTH")) %>% 
+  filter(YEAR == 2020)
 ```
 
