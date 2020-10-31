@@ -72,4 +72,4 @@ state_data_tc <- state_data %>%
 combined_data <- inner_join(uemp_data_2020, state_data_tc, 
                             by = c("state", "year_mon"))
 
-saveRDS(combined_data, "./combined.rds")
+saveRDS(combined_data, "./data/combined.rds")
