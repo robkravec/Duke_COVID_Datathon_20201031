@@ -218,6 +218,22 @@ data_cgf_loc <- data_cgf_loc %>%
   mutate(worst_month = ifelse(avg3 == max(avg3, na.rm = T), 1, 0))
 ```
 
+NOTE: I've noticed a non-negligible number of entries observations with a 3-month
+rolling average unemployment rate of 0. That's certainly not ideal, and we may
+need to do some filtering going forward to remove those locations
+
+```{r flaggin-zeros}
+# Inspect locations that achieve a 3-month rolling average of zero unemployment
+zeros <- data_cgf_loc %>% 
+  filter(avg3 == 0)
+# While some of these may make sense (like heavy tourist towns), most are likely
+# a result of poor data collection
+
+# We'll create a flag for these locations and potentially exclude later on
+data_cgf_loc <- data_cgf_loc %>% 
+  mutate(zero_unemp = ifelse(location %in% zeros$location, 1, 0))
+```
+
 At the peak of unemployment rates (for each location), which locations had the
 highest absolute unemployment rates? Highest increase in unemployment (over 
 different time horizons)?
@@ -225,19 +241,19 @@ different time horizons)?
 ```{r largest-unemp}
 # Highest unemployment at peak
 data_cgf_loc %>% 
-  filter(worst_month == 1, YEAR == 2020, !is.na(avg6)) %>% 
+  filter(worst_month == 1, YEAR == 2020, !is.na(avg6), zero_unemp == 0) %>% 
   select(MONTH, location, unemp_rt, avg3, avg6, diff1, diff3, diff6, diff12) %>% 
   arrange(desc(unemp_rt))
 
 # Highest 3 month increase in unemployment at peak
 data_cgf_loc %>% 
-  filter(worst_month == 1, YEAR == 2020, !is.na(avg6)) %>% 
+  filter(worst_month == 1, YEAR == 2020, !is.na(avg6), zero_unemp == 0) %>% 
   select(MONTH, location, unemp_rt, avg3, avg6, diff1, diff3, diff6, diff12) %>% 
   arrange(desc(diff3))
 
 # Highest 12 month increase in unemployment at peak
 data_cgf_loc %>% 
-  filter(worst_month == 1, YEAR == 2020, !is.na(avg6)) %>% 
+  filter(worst_month == 1, YEAR == 2020, !is.na(avg6), zero_unemp == 0) %>% 
   select(MONTH, location, unemp_rt, avg3, avg6, diff1, diff3, diff6, diff12) %>% 
   arrange(desc(diff12))
 ```
@@ -246,10 +262,13 @@ Looking at September 2020 data, which locations are not doing significantly
 worse (or even better) on unemployment rate, relative to 12 months prior?
 
 ```{r}
-
+data_cgf_loc %>% 
+  filter(YEAR == 2020, MONTH == 9, zero_unemp == 0) %>% 
+  select(MONTH, location, unemp_rt, avg3, avg6, diff1, diff3, diff6, diff12) %>% 
+  arrange(diff12)
 ```
 
-Save dataset to data folder
+Save dataset to data folder that is easily accessible
 
 ```{r save-data}
 saveRDS(object = data_cgf_loc, file = "data/unemployment.RDS")
