@@ -5,7 +5,7 @@ library(zoo)
 
 # unemployment data
 
-uemp_data <- readRDS("data/unemployment_county.RDS")
+uemp_data <- readRDS("data/unemp_covid.rds")
 
 uemp_data <- uemp_data %>%
   janitor::clean_names() 
@@ -24,7 +24,7 @@ fips_to_state <- function(x) {
   fips_ind <- which(fips_code == as.character(x))
   city <- fips_location[fips_ind]
   
-  if(is.na(city)) {
+  if(is.null(city)) {
     return(NA)
   } else {
     return(city_to_state(city))
@@ -71,3 +71,5 @@ state_data_tc <- state_data %>%
   
 combined_data <- inner_join(uemp_data_2020, state_data_tc, 
                             by = c("state", "year_mon"))
+
+saveRDS(combined_data, "./combined.rds")
