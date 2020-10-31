@@ -1,9 +1,14 @@
 library(stringr)
 library(sjlabelled)
+library(tidyverse)
+library(zoo)
 
 # unemployment data
-uemp_data <- data_cgf_loc %>%
-  janitor::clean_names()
+
+uemp_data <- readRDS("data/unemployment_county.RDS")
+
+uemp_data <- uemp_data %>%
+  janitor::clean_names() 
 
 # convert city to full state name
 city_to_state <- function(x) {
@@ -64,4 +69,5 @@ state_data_tc <- state_data %>%
       na.rm = TRUE
     ))
   
-combined_data <- inner_join(uemp_data_2020, state_data_tc, by = c("state", "year_mon"))
+combined_data <- inner_join(uemp_data_2020, state_data_tc, 
+                            by = c("state", "year_mon"))
