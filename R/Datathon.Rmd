@@ -1,0 +1,554 @@
+---
+title: "Datathon 2020"
+author:
+  - Robert Kravec
+  - Michael Sarkis
+  - Marc Brooks
+  - Jack McCarthy
+date: "10/31/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ipumsr)
+library(tidyverse)
+library(rvest)
+library(zoo)
+library(lubridate)
+library(stringr)
+library(sjlabelled)
+library(factoextra)
+```
+
+```{r load_unemp_data}
+ddi <- read_ipums_ddi("./../data/cps_00002.xml")
+data <- read_ipums_micro(ddi)
+```
+
+Start with data cleaning
+
+```{r unemp_data_cleaning}
+# Start by looking at the most recent data, which we have at a monthly level
+# Filter for ages 21-65
+data_clean <- data %>% 
+  filter(YEAR >= 2019,
+         AGE >= 21,
+         AGE < 65,
+         LABFORCE > 0)
+
+# Check for incidence of missing employment status flag
+mean(data_clean$EMPSTAT == 0)
+mean(data_clean$LABFORCE == 0)
+
+# Create relevant variables for unemployment rate calculations
+data_clean <- data_clean %>% 
+  mutate(employed = as.numeric(EMPSTAT %in% c(1, 10, 12)) * WTFINL,
+         lf_weighted = (LABFORCE - 1) * WTFINL)
+```
+
+Create a data frame grouped by relevant variables to determine unemployment rate
+
+```{r unemp_group_df}
+# Create grouped data frame
+data_clean_group <- data_clean %>% 
+  group_by(YEAR, MONTH, STATEFIP, METFIPS) %>% 
+  summarise(employed = sum(employed),
+            labor_force = sum(lf_weighted),
+            total_pop = sum(WTFINL))
+
+# Calculate unemployment rate
+data_clean_group <- data_clean_group %>% 
+  mutate(unemp_rt = 1 - employed / labor_force)
+
+# Sanity check: How many employed people are there at a point in time?
+jan_2019 <- data_clean_group %>% 
+  filter(YEAR == 2019, MONTH == 1)
+sum(jan_2019$employed)
+# We get 138M, which seems about right (depending on where you look on the 
+# internet)
+
+# Another sanity check: What is the overall unemployment rate at a point in time?
+1 - sum(jan_2019$employed) / sum(jan_2019$labor_force)
+# 4.0% -- that also looks right!
+```
+
+At this point, if we're interested in metro-area-level trends, we need to 
+exclude observations with unobserved METFIPS values
+
+```{r unemp_filter}
+# Check for percentage of labor force that pertains to an unidentified 
+# METFIPS value
+sum(data_clean_group[which(data_clean_group$METFIPS %in% c(99998, 99999)),]$labor_force) / sum(data_clean_group$labor_force)
+# That's not great, but it looks like we'll lose observations pertaining to 
+# about 15% of the labor force
+
+# Create filtered df. Cgf = cleaned, grouped, filtered
+data_cgf <- data_clean_group %>% 
+  filter(!(METFIPS %in% c(99998, 99999)))
+```
+
+Scrape METFIPS crosswalk from ipums website
+
+```{r metfips_scrape}
+# Define URL
+url <- "https://cps.ipums.org/cps/codes/metfips_2014onward_codes.shtml"
+
+# Pull the location
+fips_location <- read_html(url) %>% 
+  html_nodes(css = "dd") %>% 
+  html_text()
+
+# Pull the code
+fips_code <- read_html(url) %>% 
+  html_nodes(css = "dt") %>% 
+  html_text()
+
+# Combine location and code into a crosswalk
+fips_cw <- data.frame(METFIPS = as.numeric(fips_code), 
+                      location = fips_location)
+```
+
+Add location label to data frame with unemployment data
+
+```{r merge_location}
+# Join data sets
+data_cgf_loc <- left_join(x = data_cgf, y = fips_cw, by = "METFIPS")
+
+# Create a single date column
+data_cgf_loc <- data_cgf_loc %>% 
+  mutate(year_mon = as.yearmon(paste(YEAR, MONTH), "%Y %m"))
+```
+
+Let's do a quick visualization of a few cities just to make sure everything 
+looks OK
+
+```{r plot_unemployment_rate}
+# Tucson, AZ
+data_cgf_loc %>% 
+  filter(location == "Tucson, AZ") %>% 
+  ggplot(mapping = aes(x = year_mon, y = unemp_rt)) + geom_line() +
+  labs(x = "Date", y = "Unemployment rate",
+       title = "Unemployment rate over time in Tucson, AZ") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# Birmingham, AL
+data_cgf_loc %>% 
+  filter(location == "Birmingham-Hoover, AL") %>% 
+  ggplot(mapping = aes(x = year_mon, y = unemp_rt)) + geom_line() +
+  labs(x = "Date", y = "Unemployment rate",
+       title = "Unemployment rate over time in Birmingham, AL") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# Fresno, CA
+data_cgf_loc %>% 
+  filter(location == "Fresno, CA") %>% 
+  ggplot(mapping = aes(x = year_mon, y = unemp_rt)) + geom_line() +
+  labs(x = "Date", y = "Unemployment rate",
+       title = "Unemployment rate over time in Fresno, CA") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+Create some time series variables
+
+```{r unemp_time_series}
+# Focus on three month and six month rolling average
+data_cgf_loc <- data_cgf_loc %>% 
+  ungroup() %>% 
+  group_by(location) %>% 
+  arrange(location, YEAR, MONTH) %>% 
+  mutate(lag1 = lag(x = unemp_rt, n = 1),
+         lag2 = lag(x = unemp_rt, n = 2),
+         lag3 = lag(x = unemp_rt, n = 3),
+         lag4 = lag(x = unemp_rt, n = 4),
+         lag5 = lag(x = unemp_rt, n = 5),
+         avg3 = (unemp_rt + lag1 + lag2) / 3,
+         avg6 = (unemp_rt + lag1 + lag2 + lag3 + lag4 + lag5) / 6
+         )
+```
+
+Let's see if the trends are a little smoother for `avg3` and `avg6` in the 3
+cities that we visualized before
+
+```{r plot_unemployment_rate_smooth}
+# Tucson, AZ
+data_cgf_loc %>% 
+  filter(location == "Tucson, AZ") %>% 
+  ggplot(mapping = aes(x = year_mon)) + 
+  geom_line(mapping = aes(y = unemp_rt, color = "Point in time")) +
+  geom_line(mapping = aes(y = avg3, color = "3 month")) +
+  geom_line(mapping = aes(y = avg6, color = "6 month")) +
+  labs(x = "Date", y = "Unemployment rate",
+       title = "Unemployment rate over time in Tucson, AZ",
+       color = "Legend") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# Birmingham, AL
+data_cgf_loc %>% 
+  filter(location == "Birmingham-Hoover, AL") %>% 
+  ggplot(mapping = aes(x = year_mon)) + 
+  geom_line(mapping = aes(y = unemp_rt, color = "Point in time")) +
+  geom_line(mapping = aes(y = avg3, color = "3 month")) +
+  geom_line(mapping = aes(y = avg6, color = "6 month")) +
+  labs(x = "Date", y = "Unemployment rate",
+       title = "Unemployment rate over time in Birmingham, AL",
+       color = "Legend") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# Fresno, CA
+data_cgf_loc %>% 
+  filter(location == "Fresno, CA") %>% 
+  ggplot(mapping = aes(x = year_mon)) + 
+  geom_line(mapping = aes(y = unemp_rt, color = "Point in time")) +
+  geom_line(mapping = aes(y = avg3, color = "3 month")) +
+  geom_line(mapping = aes(y = avg6, color = "6 month")) +
+  labs(x = "Date", y = "Unemployment rate",
+       title = "Unemployment rate over time in Fresno, CA",
+       color = "Legend") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+Create variables that indicate changes in rolling average unemployment rate
+
+```{r unemp_diff_variables}
+data_cgf_loc <- data_cgf_loc %>% 
+  mutate(diff1 = avg3 - lag(x = avg3, n = 1),
+         diff3 = avg3 - lag(x = avg3, n = 3),
+         diff6 = avg3 - lag(x = avg3, n = 6),
+         diff12 = avg3 - lag(x = avg3, n = 12)
+         )
+```
+
+Flag worst unemployment rate month for each location
+
+```{r worst_unemp_rt}
+data_cgf_loc <- data_cgf_loc %>% 
+  mutate(worst_month = ifelse(avg3 == max(avg3, na.rm = T), 1, 0))
+```
+
+NOTE: I've noticed a non-negligible number of entries observations with a 3-month
+rolling average unemployment rate of 0. That's certainly not ideal, and we may
+need to do some filtering going forward to remove those locations
+
+```{r unemp_flagging_zeros}
+# Inspect locations that achieve a 3-month rolling average of zero unemployment
+zeros <- data_cgf_loc %>% 
+  filter(avg3 == 0)
+# While some of these may make sense (like heavy tourist towns), most are likely
+# a result of poor data collection
+
+# We'll create a flag for these locations and potentially exclude later on
+data_cgf_loc <- data_cgf_loc %>% 
+  mutate(zero_unemp = ifelse(location %in% zeros$location, 1, 0))
+```
+
+At the peak of unemployment rates (for each location), which locations had the
+highest absolute unemployment rates? Highest increase in unemployment (over 
+different time horizons)?
+
+```{r largest_unemp}
+# Highest unemployment at peak
+data_cgf_loc %>% 
+  filter(worst_month == 1, YEAR == 2020, !is.na(avg6), zero_unemp == 0) %>% 
+  select(MONTH, location, unemp_rt, avg3, avg6, diff1, diff3, diff6, diff12) %>% 
+  arrange(desc(unemp_rt))
+
+# Highest 3 month increase in unemployment at peak
+data_cgf_loc %>% 
+  filter(worst_month == 1, YEAR == 2020, !is.na(avg6), zero_unemp == 0) %>% 
+  select(MONTH, location, unemp_rt, avg3, avg6, diff1, diff3, diff6, diff12) %>% 
+  arrange(desc(diff3))
+
+# Highest 12 month increase in unemployment at peak
+data_cgf_loc %>% 
+  filter(worst_month == 1, YEAR == 2020, !is.na(avg6), zero_unemp == 0) %>% 
+  select(MONTH, location, unemp_rt, avg3, avg6, diff1, diff3, diff6, diff12) %>% 
+  arrange(desc(diff12))
+```
+
+Looking at September 2020 data, which locations are not doing significantly 
+worse (or even better) on unemployment rate, relative to 12 months prior?
+
+```{r unemp_sept}
+data_cgf_loc %>% 
+  filter(YEAR == 2020, MONTH == 9, zero_unemp == 0) %>% 
+  select(MONTH, location, unemp_rt, avg3, avg6, diff1, diff3, diff6, diff12) %>% 
+  arrange(diff12)
+```
+
+Save dataset to data folder that is easily accessible
+
+```{r save_unemp_data}
+saveRDS(object = data_cgf_loc, file = "./../data/unemployment.RDS")
+```
+
+It turns out that we need to have county FIP code in order to merge with a
+different data source about COVID rates. I'll now work on getting a version
+of the data that is grouped by county FIPS
+
+```{r unemp_group_county}
+# Create grouped data frame
+data_clean_county <- data_clean %>% 
+  filter(COUNTY != 0) %>% 
+  group_by(YEAR, MONTH, STATEFIP, COUNTY, METFIPS) %>% 
+  summarise(employed = sum(employed),
+            labor_force = sum(lf_weighted),
+            total_pop = sum(WTFINL))
+
+# Calculate unemployment rate
+data_clean_county <- data_clean_county %>% 
+  mutate(unemp_rt = 1 - employed / labor_force)
+
+# Add columns
+data_clean_county <- data_clean_county %>% 
+  ungroup() %>% 
+  group_by(COUNTY) %>% 
+  arrange(COUNTY, YEAR, MONTH) %>% 
+  mutate(lag1 = lag(x = unemp_rt, n = 1),
+         lag2 = lag(x = unemp_rt, n = 2),
+         lag3 = lag(x = unemp_rt, n = 3),
+         lag4 = lag(x = unemp_rt, n = 4),
+         lag5 = lag(x = unemp_rt, n = 5),
+         avg3 = (unemp_rt + lag1 + lag2) / 3,
+         avg6 = (unemp_rt + lag1 + lag2 + lag3 + lag4 + lag5) / 6,
+         diff1 = avg3 - lag(x = avg3, n = 1),
+         diff3 = avg3 - lag(x = avg3, n = 3),
+         diff6 = avg3 - lag(x = avg3, n = 6),
+         diff12 = avg3 - lag(x = avg3, n = 12),
+         worst_month = ifelse(avg3 == max(avg3, na.rm = T), 1, 0)
+         )
+
+# Inspect locations that achieve a 3-month rolling average of zero unemployment
+zeros <- data_clean_county %>% 
+  filter(avg3 == 0)
+# While some of these may make sense (like heavy tourist towns), most are likely
+# a result of poor data collection
+
+# We'll create a flag for these locations and potentially exclude later on
+data_clean_county <- data_clean_county %>% 
+  mutate(zero_unemp = ifelse(COUNTY %in% zeros$COUNTY, 1, 0))
+
+# Add location
+# Join data sets
+data_clean_county <- left_join(x = data_clean_county, y = fips_cw, by = "METFIPS")
+
+# Create a single date column
+data_clean_county <- data_clean_county %>% 
+  mutate(year_mon = as.yearmon(paste(YEAR, MONTH), "%Y %m"))
+
+# Save data
+saveRDS(object = data_clean_county, file = "./../data/unemployment_county.RDS")
+```
+
+Export merged unemployment and COVID data
+
+```{r merge_unemp_covid}
+# Load COVID data
+covid_data <- readRDS("./../data/county_rates.rds")
+
+# Group COVID data
+covid_group <- covid_data %>% 
+  group_by(county_name, countyFIPS, stateFIPS, year, month) %>% 
+  summarise(pop = mean(population),
+            cases = max(cases),
+            death = max(deaths)) %>% 
+  mutate(COUNTY = countyFIPS,
+         MONTH = month)
+
+# Combine COVID and unemployment data. Filter for only 2020
+unemp_covid <- left_join(x = data_clean_county, y = covid_group, 
+                         by = c("COUNTY", "MONTH")) %>% 
+  filter(YEAR == 2020)
+```
+
+Next, we obtain data relating to government policies in each state.
+
+```{r load_policy_data}
+# For description of variables:
+# https://github.com/OxCGRT/covid-policy-tracker/blob/master/documentation/codebook.md
+url <- "https://raw.githubusercontent.com/OxCGRT/covid-policy-tracker/master/data/OxCGRT_latest.csv"
+
+raw_data <- read.csv(url) 
+
+# clean names and dates
+clean_data <- raw_data %>%
+  janitor::clean_names() %>%
+  mutate(date = ymd(date)) %>%
+  select(-contains("flag"),
+         -m1_wildcard)
+
+# further clean variable names
+names(clean_data)[6:23] <- substring(names(clean_data)[6:23], 4)
+
+# country-level data
+# world_data <- clean_data %>%
+#   filter(region_name == "") %>%
+#   select(-contains("region"))
+
+# state-level data
+state_data <- clean_data %>%
+  filter(country_code == "USA",
+         region_code  != "") %>%
+  select(-c("country_name", 
+            "country_code")) %>%
+  rename(state = region_name)
+```
+
+Save state policy data.
+
+```{r save_policy_data}
+saveRDS(state_data, "./../data/policies.rds")
+```
+
+Now that we have collected all of the data relevant to our project, we combine 
+it into a single entity.
+
+```{r combine_all}
+uemp_data <- readRDS("./../data/unemp_covid.rds")
+
+uemp_data <- uemp_data %>%
+  janitor::clean_names() 
+
+# convert city to full state name
+city_to_state <- function(x) {
+  # get state abbreviation from city var
+  state_abb <- str_sub(x, -2)
+  abb_ind <- which(state.abb == state_abb)
+  
+  return(state.name[abb_ind])
+}
+
+# convert metfips to state name
+fips_to_state <- function(x) {
+  fips_ind <- which(fips_code == as.character(x))
+  city <- fips_location[fips_ind]
+  
+  if(is.null(city)) {
+    return(NA)
+  } else {
+    return(city_to_state(city))
+  }
+}
+
+# add state column and clean a bit
+uemp_data <- remove_all_labels(uemp_data) %>%
+  mutate(state = map(metfips, fips_to_state)) %>%
+  unnest(cols = c(state))
+
+uemp_data_2020 <- uemp_data %>%
+  filter(grepl("2020", year_mon, fixed = TRUE)) %>%
+  mutate(year_mon = as.character(year_mon))
+
+state_data_tc <- state_data %>%
+  mutate(
+    year_mon = paste(month(date, label = TRUE), year(date))
+  ) %>%
+  select(year_mon,
+         state,
+         stringency_index,
+         government_response_index,
+         economic_support_index,
+         containment_health_index) %>%
+  group_by(year_mon, state) %>%
+  summarise(
+    mean_stringency_index = mean(
+      stringency_index,
+      na.rm = TRUE
+    ),
+    mean_government_response_index = mean(
+      government_response_index,
+      na.rm = TRUE
+    ),
+    mean_economic_support_index    = mean(
+      economic_support_index,
+      na.rm = TRUE
+    ),
+    mean_containment_health_index  = mean(
+      containment_health_index,
+      na.rm = TRUE
+    ))
+  
+combined_data <- inner_join(uemp_data_2020, state_data_tc, 
+                            by = c("state", "year_mon"))
+```
+
+Save the combined data.
+
+```{r save_combined_data}
+saveRDS(combined_data, "./../data/combined.rds")
+```
+
+Load combined data, and add a few quick features for changes in COVID info
+
+```{r covid_features}
+# Add some time series relevant data for the COVID info
+combined_data <- combined_data %>% 
+  group_by(county_fips) %>% 
+  mutate(case_rt = cases / pop,
+         death_rt = death / pop,
+         covid_lag1 = lag(x = cases, n = 1),
+         covid_lag3 = lag(x = cases, n = 3),
+         covid_lag6 = lag(x = cases, n = 6),
+         covid_abs_1 = cases - lag(x = cases, n = 1),
+         covid_abs_3 = cases - lag(x = cases, n = 3),
+         covid_abs_6 = cases - lag(x = cases, n = 6),
+         covid_perc_1 = ifelse(covid_lag1 == 0, NA, covid_abs_1 / covid_lag1),
+         covid_perc_3 = ifelse(covid_lag3 == 0, NA, covid_abs_3 / covid_lag3) / 3,
+         covid_perc_6 = ifelse(covid_lag6 == 0, NA, covid_abs_6 / covid_lag6)
+         )
+
+# Produce the final data set for clustering
+clustering <- combined_data %>% 
+  ungroup() %>% 
+  filter(year == 2020, month == 9, zero_unemp == 0) %>% 
+  select(county_name, 
+         avg3, avg6, diff1, diff3, diff6, diff12,
+         mean_stringency_index, mean_government_response_index,
+         mean_economic_support_index, mean_containment_health_index,
+         case_rt, death_rt, covid_perc_1, covid_perc_3)
+```
+
+Save data for clustering
+
+```{r cluster_data}
+saveRDS(object = clustering, file = "./../data/clustering.RDS")
+```
+
+Scale data for k-means clustering analysis.
+
+```{r clustering}
+set.seed(8675309)
+
+data <- clustering %>%
+  select(-county_name) %>%
+  scale()
+```
+
+Check for optimal number of clusters.
+
+```{r cluster_test}
+fviz_nbclust(data, kmeans, method = "wss")
+```
+
+Higher numbers of clusters further minimize the within cluster sum of squares, 
+but 3 clusters is adequate and simplifies our analysis. Now we perform the 
+clustering analysis.
+
+```{r perform_clustering}
+km.res <- kmeans(data, 3, nstart = 100)
+
+fviz_cluster(km.res, data) +
+  labs(x = "Principal Component 1",
+       y = "Principal Component 2", 
+       title = "K-Means Clusters | COVID + Economic Factors") +
+  theme(plot.title = element_text(size = 20),
+        axis.text = element_text(size = 16))
+
+print(km.res)
+```
+
+View members of clusters close to centroids.
+
+```{r cluster_member_examples}
+clustering[c(18, 55, 41),]
+```
